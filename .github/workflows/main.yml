@@ -25,9 +25,6 @@ on:
     tags:
       - 'v*'
 
-  schedule:
-    - cron: '0 0 * * 1' # Weekly builds
-
 env:
   GENERATED_DIR: "generated"
   CACHE_DIR: "/tmp/sheikh-cache"
@@ -52,12 +49,6 @@ jobs:
         id: get-prompt
         run: echo "prompt_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Setup cache
-        uses: actions/cache@v3
-        with:
-          path: ${{ env.CACHE_DIR }}
-          key: ${{ runner.os }}-sheikh-${{ env.TIMESTAMP }}
-
   generate-application:
     name: Generate Application
     needs: setup-environment
@@ -77,7 +68,6 @@ jobs:
           mkdir -p $CACHE_DIR
           apt-get update && apt-get install -y jq curl python3-pip
           pip install yq
-          npm install -g @withgraphite/graphite-cli
 
       - name: Download latest agent
         run: |
@@ -97,31 +87,17 @@ jobs:
             -m "${{ inputs.model }}" \
             2>&1 | tee $CACHE_DIR/generation.log
 
-          # Generate structure report
-          find $OUTPUT_DIR -type d | sed -e "s|[^/]*/|  |g" -e "s|  |├── |1" > $CACHE_DIR/structure.txt
-          
           echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
           echo "structure_file=$CACHE_DIR/structure.txt" >> $GITHUB_OUTPUT
 
-      - name: Validate output
-        run: |
-          # Check critical files
-          REQUIRED_FILES=("package.json" "src/app/layout.tsx")
-          for file in "${REQUIRED_FILES[@]}"; do
-            if [ ! -f "${{ steps.generate.outputs.output_dir }}/$file" ]; then
-              echo "::error::Missing critical file: $file"
-              exit 1
-            fi
-          done
-
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: generated-app-${{ env.TIMESTAMP }}
           path: |
             ${{ steps.generate.outputs.output_dir }}
-            $CACHE_DIR/structure.txt
             $CACHE_DIR/generation.log
+          retention-days: 7
 
   deploy-and-document:
     name: Deploy & Document
@@ -130,13 +106,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: generated-app-${{ env.TIMESTAMP }}
           path: ${{ env.GENERATED_DIR }}
@@ -150,34 +121,6 @@ jobs:
           git commit -m "feat: Generated app ${{ env.TIMESTAMP }} [skip ci]"
           git push origin main
 
-      - name: Create deployment branch
-        run: |
-          git checkout -b deploy/app-${{ env.TIMESTAMP }}
-          git push origin deploy/app-${{ env.TIMESTAMP }}
-
-      - name: Create PR
-        uses: peter-evans/create-pull-request@v5
-        with:
-          title: "Deploy: Generated App ${{ env.TIMESTAMP }}"
-          body: |
-            ### Auto-generated Application
-            **Prompt Version:** [${{ needs.setup-environment.outputs.prompt_sha }}](https://github.com/${{ github.repository }}/commit/${{ needs.setup-environment.outputs.prompt_sha }})
-            **Model:** ${{ inputs.model }}
-            
-            ### Directory Structure
-            ```text
-            $(cat ${{ env.GENERATED_DIR }}/structure.txt)
-            ```
-          branch: "deploy/app-${{ env.TIMESTAMP }}"
-          delete-branch: true
-          labels: "generated,automated"
-
-      - name: Cleanup previous
-        if: ${{ inputs.clean_previous }}
-        run: |
-          # Keep last 5 generated apps
-          ls -dt ${{ env.GENERATED_DIR }}/app-* | tail -n +6 | xargs rm -rf
-
   notify:
     name: Notification
     needs: [generate-application, deploy-and-document]
@@ -185,45 +128,14 @@ jobs:
     if: always()
     
     steps:
-      - name: Send Slack notification
+      - name: Slack Notification
         uses: slackapi/slack-github-action@v1.24.0
         with:
-          payload: |
-            {
-              "text": "Sheikh Agent Run Completed",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "*Sheikh Agent Run Completed*"
-                  }
-                },
-                {
-                  "type": "divider"
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Status:* ${{ job.status }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Run ID:* ${{ env.TIMESTAMP }}"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Prompt Version:* <https://github.com/${{ github.repository }}/commit/${{ needs.setup-environment.outputs.prompt_sha }}|${{ needs.setup-environment.outputs.prompt_sha }}>"
-                    },
-                    {
-                      "type": "mrkdwn",
-                      "text": "*Artifacts:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View>"
-                    }
-                  ]
-                }
-              ]
-            }
+          channel-id: 'automation-alerts'
+          slack-message: |
+            :robot_face: Sheikh Agent Report:
+            • Status: ${{ job.status }}
+            • Run ID: ${{ env.TIMESTAMP }}
+            • Prompt Version: ${{ needs.setup-environment.outputs.prompt_sha }}
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
