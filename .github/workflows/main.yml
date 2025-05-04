@@ -63,17 +63,29 @@ jobs:
         with:
           path: src
 
-      - name: Setup environment
+      - name: Setup Python environment
         run: |
-          mkdir -p $CACHE_DIR
-          apt-get update && apt-get install -y jq curl python3-pip
-          pip install yq
+          # Create and activate virtual environment
+          python3 -m venv .venv
+          source .venv/bin/activate
+          
+          # Install system dependencies
+          apt-get update && apt-get install -y \
+            curl \
+            jq \
+            git
+          
+          # Install Python packages in venv
+          pip install --no-cache-dir yq
+          
+          # Add venv to PATH
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
 
       - name: Download latest agent
         run: |
           curl -sL https://raw.githubusercontent.com/${{ github.repository }}/main/final.sh \
-            -o $CACHE_DIR/sheikh.sh
-          chmod +x $CACHE_DIR/sheikh.sh
+            -o sheikh.sh
+          chmod +x sheikh.sh
 
       - name: Generate application
         id: generate
@@ -81,14 +93,17 @@ jobs:
           OUTPUT_DIR="$GENERATED_DIR/app-${{ env.TIMESTAMP }}"
           mkdir -p $OUTPUT_DIR
           
-          $CACHE_DIR/sheikh.sh \
+          ./sheikh.sh \
             -p "./prompt.md" \
             -o "$OUTPUT_DIR" \
             -m "${{ inputs.model }}" \
-            2>&1 | tee $CACHE_DIR/generation.log
+            2>&1 | tee generation.log
 
           echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
-          echo "structure_file=$CACHE_DIR/structure.txt" >> $GITHUB_OUTPUT
+          echo "structure_file=structure.txt" >> $GITHUB_OUTPUT
+
+          # Generate structure report
+          find $OUTPUT_DIR -type d | sed -e "s|[^/]*/|  |g" -e "s|  |├── |1" > structure.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -96,7 +111,8 @@ jobs:
           name: generated-app-${{ env.TIMESTAMP }}
           path: |
             ${{ steps.generate.outputs.output_dir }}
-            $CACHE_DIR/generation.log
+            structure.txt
+            generation.log
           retention-days: 7
 
   deploy-and-document:
