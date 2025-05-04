@@ -1,0 +1,137 @@
+name: Sheikh Agent Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt_url:
+        description: "URL to MDX prompt file"
+        required: false
+        default: "https://raw.githubusercontent.com/likhonsdev/sheikh-agent/main/prompt.md"
+      output_dir:
+        description: "Output directory name"
+        required: false
+        default: "generated_app"
+      model:
+        description: "Gemini model version"
+        required: false
+        default: "gemini-1.5-flash"
+
+  push:
+    branches: [ main ]
+    paths:
+      - 'prompt.md'
+      - '.github/workflows/sheikh-agent.yml'
+
+env:
+  CACHE_DIR: /tmp/sheikh-cache
+  LOG_FILE: ${{ env.CACHE_DIR }}/sheikh.log
+
+jobs:
+  generate-app:
+    runs-on: ubuntu-latest
+    container: debian:bookworm-slim
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup environment
+      run: |
+        mkdir -p $CACHE_DIR
+        apt-get update && apt-get install -y \
+          curl jq awk sed git \
+          build-essential python3-pip
+        pip install yq
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "Sheikh Agent"
+        git config --global user.email "sheikh-agent@github.com"
+        git config --global --add safe.directory /github/workspace
+
+    - name: Get current timestamp
+      id: timestamp
+      run: echo "timestamp=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+
+    - name: Generate application
+      id: generate
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: |
+        # Download the latest script
+        curl -sL https://raw.githubusercontent.com/likhonsdev/sheikh-agent/main/final.sh -o sheikh.sh
+        chmod +x sheikh.sh
+
+        # Execute generation
+        ./sheikh.sh \
+          -p "${{ inputs.prompt_url }}" \
+          -o "${{ inputs.output_dir }}_${{ steps.timestamp.outputs.timestamp }}" \
+          -m "${{ inputs.model }}" || exit 1
+
+        # Create versioned directory
+        OUTPUT_DIR="${{ inputs.output_dir }}_${{ steps.timestamp.outputs.timestamp }}"
+        echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
+
+        # Generate structure report
+        find $OUTPUT_DIR -type d | sed -e "s|[^/]*/|  |g" -e "s|  |├── |1" > structure.txt
+        echo "structure_file=structure.txt" >> $GITHUB_OUTPUT
+
+    - name: Commit generated files
+      run: |
+        git add "${{ steps.generate.outputs.output_dir }}" structure.txt
+        git commit -m "Sheikh Agent: Generated ${{ steps.generate.outputs.output_dir }} [skip ci]"
+        git push origin main
+
+    - name: Create PR with changes
+      if: github.ref == 'refs/heads/main'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        title: "Sheikh Agent: New Generated App (${{ steps.timestamp.outputs.timestamp }})"
+        body: |
+          ### Auto-generated Application
+          **Model:** ${{ inputs.model }}
+          **Prompt:** [${{ inputs.prompt_url }}](${{ inputs.prompt_url }})
+
+          ### Directory Structure
+          ```text
+          ${{ steps.generate.outputs.structure_file }}
+          ```
+        branch: "sheikh-agent/${{ steps.timestamp.outputs.timestamp }}"
+        delete-branch: true
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: generated-app-${{ steps.timestamp.outputs.timestamp }}
+        path: |
+          ${{ steps.generate.outputs.output_dir }}
+          structure.txt
+          $LOG_FILE
+
+    - name: Post generation report
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const outputDir = '${{ steps.generate.outputs.output_dir }}';
+          const structure = fs.readFileSync('structure.txt', 'utf8');
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `### 🧞 Sheikh Agent Report
+**Generated App:** ${outputDir}
+**Status:** ${{ job.status }}
+
+**Directory Structure:**
+\`\`\`text
+${structure}
+\`\`\`
+
+[View Artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.run_id }})
+            `
+          });
